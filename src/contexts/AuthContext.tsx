@@ -1,0 +1,136 @@
+
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { 
+  User, 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut,
+  updateProfile
+} from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
+import { UserRecord } from '../types';
+
+interface AuthContextType {
+  currentUser: UserRecord | null;
+  loading: boolean;
+  login: (email: string, pass: string) => Promise<void>;
+  signup: (email: string, pass: string, name: string) => Promise<void>;
+  logout: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
+  return context;
+};
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [currentUser, setCurrentUser] = useState<UserRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        // Default user data from Auth
+        const isAdmin = user.email === 'admin@demo.com' || user.email === 'aegy238@gmail.com';
+        
+        const basicUserData: UserRecord = {
+          id: user.uid,
+          email: user.email || '',
+          name: user.displayName || 'User',
+          role: isAdmin ? 'admin' : 'user',
+          isApproved: true,
+          isVIP: false,
+          status: 'active',
+          subscriptionType: 'none',
+          freeAttempts: 5,
+          coins: 0,
+          subscriptionExpiry: new Date(),
+          createdAt: new Date(),
+          lastLogin: new Date()
+        };
+
+        try {
+          // Try to fetch user data from Firestore
+          const userDocRef = doc(db, 'users', user.uid);
+          const userDoc = await getDoc(userDocRef);
+
+          if (userDoc.exists()) {
+            setCurrentUser({ id: user.uid, ...userDoc.data() } as UserRecord);
+          } else {
+            // If doc doesn't exist, try to create it, but don't block if it fails
+            try {
+              await setDoc(userDocRef, basicUserData);
+              setCurrentUser(basicUserData);
+            } catch (writeErr) {
+              console.warn("Could not create user document (likely permission issue):", writeErr);
+              // Fallback to basic data in memory
+              setCurrentUser(basicUserData);
+            }
+          }
+        } catch (err) {
+          console.warn("Could not fetch user document (likely permission issue):", err);
+          // Fallback to basic data in memory
+          setCurrentUser(basicUserData);
+        }
+      } else {
+        setCurrentUser(null);
+      }
+      setLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  const login = async (email: string, pass: string) => {
+    await signInWithEmailAndPassword(auth, email, pass);
+  };
+
+  const signup = async (email: string, pass: string, name: string) => {
+    const { user } = await createUserWithEmailAndPassword(auth, email, pass);
+    await updateProfile(user, { displayName: name });
+    
+    // Create user document in Firestore
+    const isAdmin = email === 'admin@demo.com' || email === 'aegy238@gmail.com';
+    
+    const newUserData: Omit<UserRecord, 'id'> = {
+      name,
+      email,
+      role: isAdmin ? 'admin' : 'user',
+      isApproved: true,
+      isVIP: false,
+      status: 'active',
+      subscriptionType: 'none',
+      freeAttempts: 5,
+      coins: 0,
+      subscriptionExpiry: new Date(),
+      createdAt: new Date(),
+      lastLogin: new Date()
+    };
+    
+    try {
+      await setDoc(doc(db, 'users', user.uid), newUserData);
+      setCurrentUser({ id: user.uid, ...newUserData });
+    } catch (err) {
+      console.error("Firestore Write Error:", err);
+      // Even if Firestore write fails, we set the local state so the user can proceed
+      setCurrentUser({ id: user.uid, ...newUserData });
+      // We might want to alert the user, but for now, logging is enough.
+      // The UI will just work with the in-memory user object.
+    }
+  };
+
+  const logout = async () => {
+    await signOut(auth);
+  };
+
+  return (
+    <AuthContext.Provider value={{ currentUser, loading, login, signup, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
